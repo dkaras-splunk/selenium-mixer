@@ -1,0 +1,93 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+name: expose
+description: "GitHub actions which install cloudflared and setup configuration to establish tunneling for GH workflows"
+branding:
+  icon: eye
+  color: red
+inputs:
+  domain-cert:
+    description: "pem cert base64 encoded from login cf"
+    required: true
+  domain-name:
+    description: "Domain name"
+    required: true
+  subdomain-name:
+    description: "Subdomain which will be used to build services names and it will be a tunnel name"
+    required: true 
+  config:
+    description: "Configuration file to establish services UID_TUNNEL env variable will be used to ingest ID tunnel"
+    required: true
+  ssh-username:
+    description: "Username for ssh only for linux"
+    required: false
+  ssh-password:
+    description: "Password for ssh user"
+    required: false
+
+runs:
+  using: composite
+  steps:
+    - name: Setup SSH Account for Linux if details are provide
+      if: runner.os == 'Linux' && inputs.ssh-username && inputs.ssh-password
+      shell: bash
+      run: |
+        sudo service ssh restart
+        sudo systemctl restart ssh
+        sudo useradd -m -p $(perl -e 'print crypt($ARGV[0], "password")' '${{ inputs.ssh-password }}') -s /bin/bash ${{ inputs.ssh-username }}
+        echo " User name: ${{ inputs.ssh-username }} created!!!"
+    - name: Install Cloudflared
+      shell: bash
+      run: |
+        export CF_BASEDOWNLOAD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-"
+        if [ "$RUNNER_OS" = "macOS" ]; then
+          echo "Download url ${CF_BASEDOWNLOAD_URL}darwin-amd64.tgz"
+          wget -O cloudflared.tgz -q "${CF_BASEDOWNLOAD_URL}darwin-amd64.tgz" || (brew install cloudflare/cloudflare/cloudflared) # fisrt try to download latest from github if its fail use brew
+          tar xvf cloudflared.tgz || true
+          mv ./cloudflared /usr/local/bin || true
+        elif [ "$RUNNER_OS" = "Linux" ]; then
+          echo "Download url ${CF_BASEDOWNLOAD_URL}linux-amd64"
+          wget -O cloudflared -q "${CF_BASEDOWNLOAD_URL}linux-amd64" 
+          chmod 755 cloudflared
+          sudo mv ./cloudflared /usr/local/bin
+        elif [ "$RUNNER_OS" = "Windows" ]; then
+          choco install cloudflared
+        fi
+    - name: Check version of cloudflared
+      shell: bash
+      run: cloudflared --version
+    - name: Setup Cloudflared
+      shell: bash
+      env:
+        DOMAIN_CERT: ${{ inputs.domain-cert }}
+        DOMAIN_NAME: ${{ inputs.domain-name }}
+        SUB_DOMAIN_NAME: ${{ inputs.subdomain-name }}
+        CONFIG_YANL: ${{ inputs.config }}     
+      run: |
+        mkdir ~/.cloudflared/
+        echo -n "$DOMAIN_CERT" | base64 -d >> ~/.cloudflared/cert.pem        
+        cloudflared --cred-file tunnel.json  tunnel create $SUB_DOMAIN_NAME-${RANDOM} 
+        export UID_TUNNEL=$(cat tunnel.json | jq -r '.TunnelID') 
+        echo "Deployment name: ${SUB_DOMAIN_NAME}.${DOMAIN_NAME}"
+        echo "UID TUNNEL $UID_TUNNEL"
+        echo "${{ inputs.config }}" > config.yml
+        echo "Config file:>"
+        envsubst < config.yml | tee "$HOME/.cloudflared/config.yml"
+        echo "<:End config file"
+        echo "Setup dns tunnel for domains:>"
+        cat config.yml | grep hostname | awk -F' ' '{print $NF}'
+        echo "Aplying:> "
+        cat config.yml | grep hostname | awk -F' ' '{print $NF}' | xargs -n1 cloudflared -f tunnel route dns $UID_TUNNEL
+        echo "<End setup dns tunnel for domains"
+        nohup cloudflared tunnel --config ~/.cloudflared/config.yml run $DEPLOYMENT_NAME &

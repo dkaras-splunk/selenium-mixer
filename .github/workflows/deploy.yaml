@@ -1,0 +1,42 @@
+name: Deploy Selenium Grid
+on:
+  workflow_dispatch:
+    inputs:
+      system:
+        type: choice
+        description: Select the type of machine
+        options: ["ubuntu-latest", "windows-latest", "macos-latest"]
+      subdomain:
+        description: Subdomain
+      lifetime:
+        descriptiom: Lifetime in seconds
+        default: 600
+jobs:
+  selenium:
+    runs-on: ${{ github.event.inputs.system }}
+    steps:
+    - uses: actions/checkout@v2
+    - name: Expose
+      uses: ./.github/actions/expose
+      with: 
+        domain-cert: ${{ secrets.CLOUDFLARECERT }}
+        domain-name: st3p.ga
+        subdomain-name: ${{ github.event.inputs.subdomain }} 
+        config: |
+          tunnel: $UID_TUNNEL                                       
+          credentials-file: tunnel.json
+          ingress:
+            - hostname: $SUB_DOMAIN_NAME.$DOMAIN_NAME
+              service: http://localhost:4444
+            - service: http_status:404
+    - name: Selenium 
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" = "macOS" ]; then
+          brew services restart selenium-server
+        else
+          export DISPLAY=:99 
+          sudo Xvfb -ac :99 -screen 0 1280x1024x24 > /dev/null 2>&1&
+          java -jar $SELENIUM_JAR_PATH standalone 2>&1 | tee selenium.log &
+        fi 
+        sleep ${{ github.event.inputs.lifetime }}
